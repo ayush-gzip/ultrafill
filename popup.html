@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 260px; margin: 0; padding: 12px; background: #16161a; color: #eee; font: 13px/1.3 system-ui, sans-serif; }
+    h1 { font-size: 15px; margin: 0 0 10px; }
+    button { display: block; width: 100%; margin: 0 0 6px; padding: 8px 10px; text-align: left; cursor: pointer;
+      background: #232329; color: inherit; border: 1px solid #33333b; border-radius: 6px; font: inherit; }
+    button:hover { border-color: #55555f; }
+    button.on { border-color: #4f8cff; background: #1c2a45; }
+    button span { display: block; color: #9a9aa5; font-size: 12px; margin-top: 2px; }
+    p { margin: 8px 0 0; color: #9a9aa5; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>UltraFill</h1>
+  <button data-mode="elastic"><b>Elastic</b><span>Fill width, center keeps its shape, nothing cropped</span></button>
+  <button data-mode="stretch"><b>Stretch</b><span>Fill width evenly, nothing cropped</span></button>
+  <button data-mode="zoom"><b>Zoom</b><span>Fill by cropping top and bottom</span></button>
+  <button data-mode="off"><b>Off</b><span>Original picture</span></button>
+  <p id="key"></p>
+  <script src="popup.js"></script>
+</body>
+</html>

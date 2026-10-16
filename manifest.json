@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "UltraFill",
+  "version": "0.1.0",
+  "description": "Fill ultrawide screens with 16:9 video. Elastic stretch keeps the center natural and never crops burned-in subtitles.",
+  "permissions": ["storage"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "UltraFill" },
+  "commands": {
+    "cycle-mode": {
+      "suggested_key": { "default": "Alt+Shift+F" },
+      "description": "Cycle fill mode"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}
