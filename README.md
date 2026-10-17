@@ -27,6 +27,8 @@ The video gets a CSS `scale` so the picture fills the player box, then an SVG `f
 
 The displacement map is coded in the **alpha** channel: Chrome passes filter colors through the display's tone curve, which skews a color-coded map, but it never touches alpha.
 
+Maps are in units of the video box, so one map serves every size of the same shape. They are cached, so going in and out of fullscreen reuses them. While the player resizes, the last map stays, and the new one is built 200ms after the size stops changing.
+
 ## Limits
 
 - Only touches players at least 60% of the window width, so small inline videos are left alone.

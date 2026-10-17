@@ -5,18 +5,26 @@
   const NS = 'http://www.w3.org/2000/svg';
   const MIN_BOX_FRACTION = 0.6; // only touch main players, not small inline videos
   const LABELS = { elastic: 'Elastic', stretch: 'Stretch', zoom: 'Zoom', off: 'Off' };
+  const MAP_SAMPLES = 1024;
+  const MAX_MAPS = 8;
+  const SETTLE_MS = 200;
 
   let mode = 'elastic';
   let nextId = 1;
+  let nextMap = 1;
   let rafPending = false;
   let styleEl = null;
   let svgEl = null;
   let toastEl = null;
   let toastTimer = 0;
-  const tracked = new Map(); // video -> { id, sig, box, filterKey }
+  const tracked = new Map(); // video -> { id, sig, box, filter, settled, timer }
   const rules = new Map(); // id -> css declarations
+  // shape key -> filter id. A map is in units of the element box, so any video of the same
+  // shape at any size can use it: fullscreen in and out reuses maps and builds nothing.
+  const maps = new Map();
 
-  const ro = new ResizeObserver(() => schedule());
+  // Runs after layout and before paint, so a new size never shows a frame with the old fit.
+  const ro = new ResizeObserver(run);
 
   function contain(w, h, aspect) {
     return w / h > aspect ? { w: h * aspect, h } : { w, h: w / aspect };
@@ -28,15 +36,12 @@
     return el;
   }
 
+  // An SPA can remove our nodes; put the same ones back so their rules and maps stay valid.
   function ensureDom() {
-    if (!styleEl || !styleEl.isConnected) {
-      styleEl = document.createElement('style');
-      (document.head || document.documentElement).append(styleEl);
-    }
-    if (!svgEl || !svgEl.isConnected) {
-      svgEl = svgNode('svg', { 'aria-hidden': 'true', style: 'position:absolute;width:0;height:0;pointer-events:none' });
-      (document.body || document.documentElement).append(svgEl);
-    }
+    if (!styleEl) styleEl = document.createElement('style');
+    if (!styleEl.isConnected) (document.head || document.documentElement).append(styleEl);
+    if (!svgEl) svgEl = svgNode('svg', { 'aria-hidden': 'true', style: 'position:absolute;width:0;height:0;pointer-events:none' });
+    if (!svgEl.isConnected) (document.body || document.documentElement).append(svgEl);
   }
 
   function setRule(t, css) {
@@ -47,9 +52,9 @@
   }
 
   function dropFilter(t) {
-    if (!t.filterKey) return;
-    svgEl?.querySelector(`#uf-f-${t.id}`)?.remove();
-    t.filterKey = '';
+    t.filter = '';
+    t.settled = false;
+    clearTimeout(t.timer);
   }
 
   // Output x shows source u(x), with x and u from -1 to 1 across the picture.
@@ -62,41 +67,34 @@
     return Math.sign(x) * u;
   }
 
-  function buildFilter(v, t, ratio, aspect) {
-    const c = Math.min(ratio, 1.95); // the curve folds back at c = 2
+  // c = horizontal scale / vertical scale, r = element width / picture width (r > 1 when
+  // the picture letterboxes inside the element). Returns the id of a <filter> in box units.
+  function buildMap(c, r) {
     const a = (0.5 * (2 - c)) / c;
-    const ew = v.offsetWidth;
-    const eh = v.offsetHeight;
-    const lw = contain(ew, eh, aspect).w;
-    const key = [ew, eh, lw, c.toFixed(4)].join();
-    if (key === t.filterKey && svgEl?.querySelector(`#uf-f-${t.id}`)) return;
-    dropFilter(t);
-    t.filterKey = key;
-
-    const ldx = (ew - lw) / 2;
-    const n = Math.ceil(ew);
-    const shift = new Float64Array(n);
+    const shift = new Float64Array(MAP_SAMPLES); // as a fraction of the element width
     let max = 0;
-    for (let i = 0; i < n; i++) {
-      const x = Math.max(-1, Math.min(1, (i + 0.5 - ldx - lw / 2) / (lw / 2)));
-      shift[i] = ((curve(x, c, a) - x) * lw) / 2;
+    for (let i = 0; i < MAP_SAMPLES; i++) {
+      const x = Math.max(-1, Math.min(1, (((i + 0.5) / MAP_SAMPLES) * 2 - 1) * r));
+      shift[i] = (curve(x, c, a) - x) / (2 * r);
       max = Math.max(max, Math.abs(shift[i]));
     }
-    const scale = Math.max(2.02 * max, 1);
+    const scale = 2.02 * max;
 
     // Chrome runs every color that enters a filter through the display's tone curve
     // (128 arrives as ~117), which skews a color-coded map and moves the picture.
     // Alpha is never color corrected, so the map is coded in alpha and feColorMatrix
     // moves it to R. G is a fixed 0.5: no vertical shift.
+    // willReadFrequently keeps the canvas on the CPU: toDataURL on a GPU canvas stalls ~30ms.
     const canvas = document.createElement('canvas');
-    canvas.width = n;
+    canvas.width = MAP_SAMPLES;
     canvas.height = 1;
-    const ctx = canvas.getContext('2d');
-    const img = ctx.createImageData(n, 1);
-    for (let i = 0; i < n; i++) img.data[i * 4 + 3] = Math.round((0.5 + shift[i] / scale) * 255);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const img = ctx.createImageData(MAP_SAMPLES, 1);
+    for (let i = 0; i < MAP_SAMPLES; i++) img.data[i * 4 + 3] = Math.round((0.5 + shift[i] / scale) * 255);
     ctx.putImageData(img, 0, 0);
 
-    const filter = svgNode('filter', { id: `uf-f-${t.id}`, x: 0, y: 0, width: 1, height: 1, 'color-interpolation-filters': 'sRGB' });
+    const id = `uf-m-${nextMap++}`;
+    const filter = svgNode('filter', { id, x: 0, y: 0, width: 1, height: 1, primitiveUnits: 'objectBoundingBox', 'color-interpolation-filters': 'sRGB' });
     filter.append(
       svgNode('feImage', { href: canvas.toDataURL(), preserveAspectRatio: 'none', result: 'a' }),
       svgNode('feColorMatrix', { in: 'a', type: 'matrix', values: '0 0 0 1 0  0 0 0 0 0.5  0 0 0 0 0  0 0 0 0 1', result: 'map' }),
@@ -104,6 +102,37 @@
     );
     ensureDom();
     svgEl.append(filter);
+    return id;
+  }
+
+  function filterFor(v, t, ratio, aspect) {
+    const c = +Math.min(ratio, 1.95).toFixed(3); // the curve folds back at c = 2
+    const r = +(v.offsetWidth / contain(v.offsetWidth, v.offsetHeight, aspect).w).toFixed(3);
+    const key = `${c} ${r}`;
+    let id = maps.get(key);
+    if (!id && t.filter && !t.settled) {
+      // Still resizing (a fullscreen animation): keep the current map, it stretches with
+      // the box. Build the new one when the size holds still.
+      clearTimeout(t.timer);
+      t.timer = setTimeout(() => { t.settled = true; t.sig = ''; schedule(); }, SETTLE_MS);
+      return t.filter;
+    }
+    t.settled = false;
+    if (id) {
+      maps.delete(key); // move to the end: the oldest entry goes first
+    } else {
+      id = buildMap(c, r);
+      const inUse = new Set([...tracked.values()].map((x) => x.filter));
+      for (const [k, old] of maps) {
+        if (maps.size < MAX_MAPS) break;
+        if (inUse.has(old)) continue;
+        maps.delete(k);
+        svgEl.querySelector(`#${old}`)?.remove();
+      }
+    }
+    maps.set(key, id);
+    t.filter = id;
+    return id;
   }
 
   // The player box: the video element itself when it letterboxes inside its own box
@@ -156,8 +185,7 @@
     const ty = y - (r1.top + sy * (d0.y - r0.top));
     let css = `scale:${sx} ${sy} !important;translate:${tx}px ${ty}px !important;`;
     if (mode === 'elastic') {
-      buildFilter(v, t, sx / sy, aspect);
-      css += `filter:url(#uf-f-${t.id}) !important;`;
+      css += `filter:url(#${filterFor(v, t, sx / sy, aspect)}) !important;`;
     } else {
       dropFilter(t);
     }
@@ -191,31 +219,29 @@
     t.sig = sigOf(v, t);
   }
 
+  function run() {
+    for (const [v, t] of tracked) update(v, t);
+  }
+
   function schedule() {
     if (rafPending) return;
     rafPending = true;
     requestAnimationFrame(() => {
       rafPending = false;
-      for (const [v, t] of tracked) update(v, t);
+      run();
     });
   }
 
   function track(v) {
     if (tracked.has(v)) return;
-    tracked.set(v, { id: nextId++, sig: '', box: null, filterKey: '' });
+    tracked.set(v, { id: nextId++, sig: '', box: null, filter: '', settled: false, timer: 0 });
     ro.observe(v);
     v.addEventListener('loadedmetadata', schedule);
     v.addEventListener('resize', schedule);
   }
 
   function scan() {
-    // An SPA can wipe our style/svg nodes; force a full re-fit so they get rebuilt.
-    if ((styleEl && !styleEl.isConnected) || (svgEl && !svgEl.isConnected)) {
-      for (const t of tracked.values()) {
-        t.sig = '';
-        t.filterKey = '';
-      }
-    }
+    if (styleEl) ensureDom();
     for (const v of document.getElementsByTagName('video')) track(v);
     schedule();
   }
